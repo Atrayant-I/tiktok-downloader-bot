@@ -1,6 +1,8 @@
 .env
+*.db
 downloads/
 seen_videos.json
 profiles.json
 __pycache__/
 *.pyc
+*.db-journal
