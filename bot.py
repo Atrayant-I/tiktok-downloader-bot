@@ -103,7 +103,7 @@ async def check_and_send():
         entries = playlist.get("entries") or []
         logger.info(f"  → {len(entries)} videos encontrados")
 
-        for entry in entries[:5]:
+        for entry in entries[:10]:
             vid_id = entry.get("id")
             if not vid_id or vid_id in seen:
                 continue
