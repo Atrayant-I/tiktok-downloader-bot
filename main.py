@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, Depends, HTTPException, Request, Form
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from telegram import Bot, Update
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 logger.info(f"IMPERSONATE_AVAILABLE={IMPERSONATE_AVAILABLE}")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = int(os.environ.get("CHAT_ID", "0"))
+CHAT_ID = int(os.environ.get("CHAT_ID") or "0")
 CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL", "30"))
 bot_app = None
 DOWNLOAD_DIR = "downloads"
@@ -76,9 +76,12 @@ def download_video(url):
 
 
 def _scan_profile(profile_url):
+    logger.info(f"  Escaneando {profile_url}...")
     ydl_opts = get_ydl_opts(download=False)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        return ydl.extract_info(profile_url, download=False)
+        result = ydl.extract_info(profile_url, download=False)
+        logger.info(f"  Escaneo completado: {len(result.get('entries', []))} entries" if result else "  Escaneo retornó None")
+        return result
 
 
 def _download_video_sync(url):
@@ -177,10 +180,10 @@ async def check_and_send():
 
                 if sent_ok:
                     os.remove(path)
+                    new_videos += 1
                 else:
                     logger.warning(f"No se pudo enviar {vid_id} tras 3 intentos. Archivo conservado.")
 
-                new_videos += 1
                 await asyncio.sleep(1.5)
 
             profile.last_checked_at = datetime.utcnow()
@@ -394,6 +397,8 @@ async def start_bot():
 async def telegram_webhook(token: str, request: Request):
     if token != BOT_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid token")
+    if bot_app is None:
+        raise HTTPException(status_code=503, detail="Bot not initialized yet")
     update = Update.de_json(await request.json(), bot_app.bot)
     await bot_app.process_update(update)
     return JSONResponse(content={"ok": True})
