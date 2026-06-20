@@ -9,7 +9,5 @@ services:
         sync: false
       - key: CHAT_ID
         sync: false
-      - key: WEB_PASSWORD
-        sync: false
       - key: CHECK_INTERVAL
-        value: 15
+        value: 30

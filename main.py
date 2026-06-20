@@ -1,21 +1,26 @@
 import os
-import json
 import asyncio
 import logging
-import secrets
+import traceback
+import re
 from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Depends, HTTPException, status, Request, Form, Header
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import FastAPI, Depends, HTTPException, Request, Form
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler
 import yt_dlp
+
+try:
+    from curl_cffi import requests as curl_requests
+    IMPERSONATE_AVAILABLE = True
+except ImportError:
+    IMPERSONATE_AVAILABLE = False
 
 from database import init_db, get_db, SessionLocal, Profile, Video
 
@@ -24,50 +29,65 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = int(os.environ.get("CHAT_ID", "0"))
-WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "admin123")
-CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL", "15"))
+CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL", "30"))
+bot_app = None
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-def check_auth(password: str = Header(default="")):
-    if not secrets.compare_digest(password, WEB_PASSWORD):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid password")
-    return True
+def get_ydl_opts(download=True):
+    opts = {
+        "quiet": True,
+        "noplaylist": True,
+        "retries": 3,
+        "socket_timeout": 30,
+    }
+    if download:
+        opts["outtmpl"] = f"{DOWNLOAD_DIR}/%(id)s.%(ext)s"
+        opts["format"] = "bestvideo+bestaudio/best"
+        opts["merge_output_format"] = "mp4"
+    else:
+        opts["extract_flat"] = "in_playlist"
 
+    if IMPERSONATE_AVAILABLE:
+        opts["impersonate"] = "chrome"
+    else:
+        opts["http_headers"] = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
 
-def migrate_json_to_db():
-    db = SessionLocal()
-    try:
-        if os.path.exists("profiles.json"):
-            usernames = json.load(open("profiles.json"))
-            for u in usernames:
-                if not db.query(Profile).filter(Profile.username == u).first():
-                    db.add(Profile(username=u, is_active=True))
-            db.commit()
-            os.rename("profiles.json", "profiles.json.bak")
-    except Exception as e:
-        logger.warning(f"Migration skipped: {e}")
-    finally:
-        db.close()
+    return opts
 
 
 def download_video(url):
-    ydl_opts = {
-        "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
-        "format": "best[ext=mp4]",
-        "quiet": True,
-        "noplaylist": True,
-    }
+    ydl_opts = get_ydl_opts(download=True)
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            path = os.path.join(DOWNLOAD_DIR, f"{info['id']}.mp4")
-            if os.path.exists(path):
-                return path, info
+            vid_id = info["id"]
+            for ext in ("mp4", "webm", "mkv"):
+                path = os.path.join(DOWNLOAD_DIR, f"{vid_id}.{ext}")
+                if os.path.exists(path):
+                    return path, info
+            return None, info
     except Exception as e:
         logger.error(f"Error descargando {url}: {e}")
     return None, None
+
+
+def _scan_profile(profile_url):
+    try:
+        ydl_opts = get_ydl_opts(download=False)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            playlist = ydl.extract_info(profile_url, download=False)
+            return playlist
+    except Exception as e:
+        logger.error(f"Error obteniendo perfil {profile_url}: {e}")
+        return None
+
+
+def _download_video_sync(url):
+    return download_video(url)
 
 
 async def check_and_send():
@@ -84,14 +104,36 @@ async def check_and_send():
             logger.info(f"Revisando @{profile.username}...")
 
             try:
-                with yt_dlp.YoutubeDL({"extract_flat": True, "quiet": True}) as ydl:
-                    playlist = ydl.extract_info(profile_url, download=False)
+                playlist = await asyncio.wait_for(
+                    asyncio.to_thread(_scan_profile, profile_url),
+                    timeout=60,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout revisando @{profile.username}")
+                try:
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=f"Error revisando @{profile.username}: timeout",
+                    )
+                except Exception:
+                    pass
+                continue
             except Exception as e:
                 logger.error(f"Error obteniendo @{profile.username}: {e}")
+                try:
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=f"Error revisando @{profile.username}: {e}",
+                    )
+                except Exception:
+                    pass
+                continue
+
+            if playlist is None:
                 continue
 
             entries = (playlist.get("entries") or [])[:10]
-            logger.info(f"  → {len(entries)} videos")
+            logger.info(f"  -> {len(entries)} videos")
 
             new_videos = 0
             for entry in entries:
@@ -102,7 +144,7 @@ async def check_and_send():
                 video_url = entry.get("url") or f"https://www.tiktok.com/@{profile.username}/video/{vid_id}"
                 logger.info(f"  Nuevo: {vid_id}")
 
-                path, info = download_video(video_url)
+                path, info = await asyncio.to_thread(_download_video_sync, video_url)
                 if not path:
                     continue
 
@@ -122,16 +164,27 @@ async def check_and_send():
 
                 caption = f"@{profile.username} - {video.title}"
                 file_size = os.path.getsize(path)
-                try:
-                    if file_size < 50 * 1024 * 1024:
-                        with open(path, "rb") as f:
-                            await bot.send_video(chat_id=CHAT_ID, video=f, caption=caption)
-                    else:
-                        await bot.send_message(chat_id=CHAT_ID, text=f"{caption}\n⚠ +50MB: {video_url}")
-                except Exception as e:
-                    logger.error(f"Error enviando {vid_id}: {e}")
+                sent_ok = False
 
-                os.remove(path)
+                for attempt in range(3):
+                    try:
+                        if file_size < 50 * 1024 * 1024:
+                            with open(path, "rb") as f:
+                                await bot.send_video(chat_id=CHAT_ID, video=f, caption=caption)
+                        else:
+                            await bot.send_message(chat_id=CHAT_ID, text=f"{caption}\n+50MB: {video_url}")
+                        sent_ok = True
+                        break
+                    except Exception as e:
+                        logger.warning(f"Intento {attempt + 1} fallido enviando {vid_id}: {e}")
+                        if attempt < 2:
+                            await asyncio.sleep(2)
+
+                if sent_ok:
+                    os.remove(path)
+                else:
+                    logger.warning(f"No se pudo enviar {vid_id} tras 3 intentos. Archivo conservado.")
+
                 new_videos += 1
                 await asyncio.sleep(1.5)
 
@@ -144,7 +197,7 @@ async def check_and_send():
 
 async def cmd_start(update: Update, context):
     await update.message.reply_text(
-        "Bot activo.\n/add @usuario | /remove @usuario | /list | /check"
+        "Bot activo.\n/add @usuario | /remove @usuario | /list | /check\n/export | /import @user1 @user2"
     )
 
 async def cmd_add(update: Update, context):
@@ -159,7 +212,7 @@ async def cmd_add(update: Update, context):
             return
         db.add(Profile(username=username, is_active=True))
         db.commit()
-        await update.message.reply_text(f"✅ @{username} agregado.")
+        await update.message.reply_text(f"@{username} agregado.")
     finally:
         db.close()
 
@@ -176,7 +229,7 @@ async def cmd_remove(update: Update, context):
             return
         db.delete(p)
         db.commit()
-        await update.message.reply_text(f"❌ @{username} eliminado.")
+        await update.message.reply_text(f"@{username} eliminado.")
     finally:
         db.close()
 
@@ -187,7 +240,7 @@ async def cmd_list(update: Update, context):
         if not profiles:
             await update.message.reply_text("No hay perfiles. Usa /add @usuario")
             return
-        text = "Perfiles:\n" + "\n".join(f"• @{p.username} ({p.video_count} videos)" for p in profiles)
+        text = "Perfiles:\n" + "\n".join(f"@{p.username} ({p.video_count} videos)" for p in profiles)
         await update.message.reply_text(text)
     finally:
         db.close()
@@ -195,12 +248,53 @@ async def cmd_list(update: Update, context):
 async def cmd_check(update: Update, context):
     await update.message.reply_text("Revisando...")
     await check_and_send()
-    await update.message.reply_text("✅ Listo.")
+    await update.message.reply_text("Listo.")
+
+async def cmd_export(update: Update, context):
+    db = SessionLocal()
+    try:
+        profiles = db.query(Profile).all()
+        if not profiles:
+            await update.message.reply_text("No hay perfiles.")
+            return
+        text = "\n".join(f"@{p.username}" for p in profiles)
+        await update.message.reply_text(text)
+    finally:
+        db.close()
+
+async def cmd_import(update: Update, context):
+    if context.args:
+        raw = " ".join(context.args)
+    elif update.message.reply_to_message and update.message.reply_to_message.text:
+        raw = update.message.reply_to_message.text
+    else:
+        await update.message.reply_text("Usa: /import @user1 @user2\nO responde a un mensaje con usernames.")
+        return
+
+    usernames = re.split(r"[\s,]+", raw)
+    usernames = [u.lstrip("@").strip() for u in usernames if u.strip()]
+
+    added = 0
+    existing = 0
+    db = SessionLocal()
+    try:
+        for uname in usernames:
+            if not uname:
+                continue
+            if db.query(Profile).filter(Profile.username == uname).first():
+                existing += 1
+            else:
+                db.add(Profile(username=uname, is_active=True))
+                added += 1
+        db.commit()
+    finally:
+        db.close()
+
+    await update.message.reply_text(f"{added} agregados, {existing} ya existian")
 
 
 # ── FastAPI ──────────────────────────────────────────
 init_db()
-migrate_json_to_db()
 
 app = FastAPI(title="TikTok Downloader Bot")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -217,8 +311,7 @@ def api_profiles(db: Session = Depends(get_db)):
              "is_active": p.is_active} for p in profiles]
 
 @app.post("/api/profiles")
-def api_add_profile(username: str = Form(...), password: str = Header(default=""), db: Session = Depends(get_db)):
-    check_auth(password)
+def api_add_profile(username: str = Form(...), db: Session = Depends(get_db)):
     username = username.lstrip("@").strip()
     if db.query(Profile).filter(Profile.username == username).first():
         raise HTTPException(400, "Profile already exists")
@@ -228,8 +321,7 @@ def api_add_profile(username: str = Form(...), password: str = Header(default=""
     return {"ok": True, "username": username}
 
 @app.delete("/api/profiles/{username}")
-def api_remove_profile(username: str, password: str = Header(default=""), db: Session = Depends(get_db)):
-    check_auth(password)
+def api_remove_profile(username: str, db: Session = Depends(get_db)):
     p = db.query(Profile).filter(Profile.username == username).first()
     if not p:
         raise HTTPException(404, "Profile not found")
@@ -268,12 +360,10 @@ def health():
 
 # ── Startup ──────────────────────────────────────────
 async def start_bot():
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_and_send, "interval", minutes=CHECK_INTERVAL_MINUTES)
-    scheduler.start()
+    global bot_app
 
     if not BOT_TOKEN or CHAT_ID == 0:
-        logger.warning("BOT_TOKEN o CHAT_ID no configurados. Bot no iniciará.")
+        logger.warning("BOT_TOKEN o CHAT_ID no configurados. Bot no iniciara.")
         return
 
     bot_app = Application.builder().token(BOT_TOKEN).build()
@@ -282,13 +372,39 @@ async def start_bot():
     bot_app.add_handler(CommandHandler("remove", cmd_remove))
     bot_app.add_handler(CommandHandler("list", cmd_list))
     bot_app.add_handler(CommandHandler("check", cmd_check))
+    bot_app.add_handler(CommandHandler("export", cmd_export))
+    bot_app.add_handler(CommandHandler("import", cmd_import))
 
     logger.info("Bot iniciado (polling)")
     await bot_app.initialize()
     await bot_app.start()
-    await bot_app.updater.start_polling()
+
+    webhook_url = os.environ.get("RENDER_EXTERNAL_URL")
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    if webhook_url:
+        full_url = f"{webhook_url.rstrip('/')}{webhook_path}"
+        await bot_app.bot.set_webhook(url=full_url, drop_pending_updates=True)
+        logger.info(f"Webhook configurado: {full_url}")
+    else:
+        await bot_app.updater.start_polling(drop_pending_updates=True)
+        logger.info("Polling iniciado (sin RENDER_EXTERNAL_URL)")
+
+    asyncio.create_task(check_and_send())
+    while True:
+        await asyncio.sleep(CHECK_INTERVAL_MINUTES * 60)
+        await check_and_send()
+
+
+@app.post("/webhook/{token}")
+async def telegram_webhook(token: str, request: Request):
+    if token != BOT_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    update = Update.de_json(await request.json(), bot_app.bot)
+    await bot_app.process_update(update)
+    return JSONResponse(content={"ok": True})
 
 
 @app.on_event("startup")
 async def startup_event():
+    global bot_app
     asyncio.create_task(start_bot())
