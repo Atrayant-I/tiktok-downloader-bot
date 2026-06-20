@@ -34,6 +34,7 @@ CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL", "30"))
 bot_app = None
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+_check_lock = asyncio.Lock()
 
 
 def get_ydl_opts(download=True):
@@ -49,6 +50,7 @@ def get_ydl_opts(download=True):
         opts["noplaylist"] = True
     else:
         opts["extract_flat"] = True
+        opts["playlistend"] = 10
 
     if IMPERSONATE_AVAILABLE:
         opts["impersonate"] = ImpersonateTarget(client="chrome")
@@ -90,6 +92,10 @@ def _download_video_sync(url):
 
 
 async def check_and_send():
+    if _check_lock.locked():
+        logger.info("Check ya en progreso, saltando...")
+        return
+    async with _check_lock:
     bot = Bot(token=BOT_TOKEN)
     db = SessionLocal()
     try:
@@ -105,14 +111,14 @@ async def check_and_send():
             try:
                 playlist = await asyncio.wait_for(
                     asyncio.to_thread(_scan_profile, profile_url),
-                    timeout=60,
+                    timeout=180,
                 )
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout revisando @{profile.username}")
                 try:
                     await bot.send_message(
                         chat_id=CHAT_ID,
-                        text=f"Error revisando @{profile.username}: timeout",
+                        text=f"Error revisando @{profile.username}: timeout (180s)",
                     )
                 except Exception:
                     pass
