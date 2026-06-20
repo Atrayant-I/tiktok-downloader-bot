@@ -38,7 +38,6 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 def get_ydl_opts(download=True):
     opts = {
         "quiet": True,
-        "noplaylist": True,
         "retries": 3,
         "socket_timeout": 30,
     }
@@ -46,6 +45,7 @@ def get_ydl_opts(download=True):
         opts["outtmpl"] = f"{DOWNLOAD_DIR}/%(id)s.%(ext)s"
         opts["format"] = "bestvideo+bestaudio/best"
         opts["merge_output_format"] = "mp4"
+        opts["noplaylist"] = True
     else:
         opts["extract_flat"] = True
 
