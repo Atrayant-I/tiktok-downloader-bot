@@ -96,108 +96,108 @@ async def check_and_send():
         logger.info("Check ya en progreso, saltando...")
         return
     async with _check_lock:
-    bot = Bot(token=BOT_TOKEN)
-    db = SessionLocal()
-    try:
-        profiles = db.query(Profile).filter(Profile.is_active == True).all()
-        if not profiles:
-            logger.info("No hay perfiles activos.")
-            return
+        bot = Bot(token=BOT_TOKEN)
+        db = SessionLocal()
+        try:
+            profiles = db.query(Profile).filter(Profile.is_active == True).all()
+            if not profiles:
+                logger.info("No hay perfiles activos.")
+                return
 
-        for profile in profiles:
-            profile_url = f"https://www.tiktok.com/@{profile.username}"
-            logger.info(f"Revisando @{profile.username}...")
+            for profile in profiles:
+                profile_url = f"https://www.tiktok.com/@{profile.username}"
+                logger.info(f"Revisando @{profile.username}...")
 
-            try:
-                playlist = await asyncio.wait_for(
-                    asyncio.to_thread(_scan_profile, profile_url),
-                    timeout=180,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout revisando @{profile.username}")
                 try:
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=f"Error revisando @{profile.username}: timeout (180s)",
+                    playlist = await asyncio.wait_for(
+                        asyncio.to_thread(_scan_profile, profile_url),
+                        timeout=180,
                     )
-                except Exception:
-                    pass
-                continue
-            except Exception as e:
-                logger.error(f"Error obteniendo @{profile.username}: {type(e).__name__}: {e}")
-                try:
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=f"Error revisando @{profile.username}: {type(e).__name__}: {e}",
-                    )
-                except Exception:
-                    pass
-                continue
-
-            if playlist is None:
-                continue
-
-            entries = (playlist.get("entries") or [])[:10]
-            logger.info(f"  -> {len(entries)} videos")
-
-            new_videos = 0
-            for entry in entries:
-                vid_id = entry.get("id")
-                if not vid_id or db.query(Video).filter(Video.video_id == vid_id).first():
-                    continue
-
-                video_url = entry.get("url") or f"https://www.tiktok.com/@{profile.username}/video/{vid_id}"
-                logger.info(f"  Nuevo: {vid_id}")
-
-                path, info = await asyncio.to_thread(_download_video_sync, video_url)
-                if not path:
-                    continue
-
-                video = Video(
-                    video_id=vid_id,
-                    username=profile.username,
-                    title=(info.get("title") or "Nuevo video").strip()[:500],
-                    thumbnail_url=info.get("thumbnail"),
-                    duration=info.get("duration"),
-                    view_count=info.get("view_count"),
-                    like_count=info.get("like_count"),
-                    tiktok_url=video_url,
-                )
-                db.add(video)
-                profile.video_count += 1
-                db.commit()
-
-                caption = f"@{profile.username} - {video.title}"
-                file_size = os.path.getsize(path)
-                sent_ok = False
-
-                for attempt in range(3):
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout revisando @{profile.username}")
                     try:
-                        if file_size < 50 * 1024 * 1024:
-                            with open(path, "rb") as f:
-                                await bot.send_video(chat_id=CHAT_ID, video=f, caption=caption)
-                        else:
-                            await bot.send_message(chat_id=CHAT_ID, text=f"{caption}\n+50MB: {video_url}")
-                        sent_ok = True
-                        break
-                    except Exception as e:
-                        logger.warning(f"Intento {attempt + 1} fallido enviando {vid_id}: {e}")
-                        if attempt < 2:
-                            await asyncio.sleep(2)
+                        await bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=f"Error revisando @{profile.username}: timeout (180s)",
+                        )
+                    except Exception:
+                        pass
+                    continue
+                except Exception as e:
+                    logger.error(f"Error obteniendo @{profile.username}: {type(e).__name__}: {e}")
+                    try:
+                        await bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=f"Error revisando @{profile.username}: {type(e).__name__}: {e}",
+                        )
+                    except Exception:
+                        pass
+                    continue
 
-                if sent_ok:
-                    os.remove(path)
-                    new_videos += 1
-                else:
-                    logger.warning(f"No se pudo enviar {vid_id} tras 3 intentos. Archivo conservado.")
+                if playlist is None:
+                    continue
 
-                await asyncio.sleep(1.5)
+                entries = (playlist.get("entries") or [])[:10]
+                logger.info(f"  -> {len(entries)} videos")
 
-            profile.last_checked_at = datetime.utcnow()
-            db.commit()
-            logger.info(f"@{profile.username}: {new_videos} nuevos")
-    finally:
-        db.close()
+                new_videos = 0
+                for entry in entries:
+                    vid_id = entry.get("id")
+                    if not vid_id or db.query(Video).filter(Video.video_id == vid_id).first():
+                        continue
+
+                    video_url = entry.get("url") or f"https://www.tiktok.com/@{profile.username}/video/{vid_id}"
+                    logger.info(f"  Nuevo: {vid_id}")
+
+                    path, info = await asyncio.to_thread(_download_video_sync, video_url)
+                    if not path:
+                        continue
+
+                    video = Video(
+                        video_id=vid_id,
+                        username=profile.username,
+                        title=(info.get("title") or "Nuevo video").strip()[:500],
+                        thumbnail_url=info.get("thumbnail"),
+                        duration=info.get("duration"),
+                        view_count=info.get("view_count"),
+                        like_count=info.get("like_count"),
+                        tiktok_url=video_url,
+                    )
+                    db.add(video)
+                    profile.video_count += 1
+                    db.commit()
+
+                    caption = f"@{profile.username} - {video.title}"
+                    file_size = os.path.getsize(path)
+                    sent_ok = False
+
+                    for attempt in range(3):
+                        try:
+                            if file_size < 50 * 1024 * 1024:
+                                with open(path, "rb") as f:
+                                    await bot.send_video(chat_id=CHAT_ID, video=f, caption=caption)
+                            else:
+                                await bot.send_message(chat_id=CHAT_ID, text=f"{caption}\n+50MB: {video_url}")
+                            sent_ok = True
+                            break
+                        except Exception as e:
+                            logger.warning(f"Intento {attempt + 1} fallido enviando {vid_id}: {e}")
+                            if attempt < 2:
+                                await asyncio.sleep(2)
+
+                    if sent_ok:
+                        os.remove(path)
+                        new_videos += 1
+                    else:
+                        logger.warning(f"No se pudo enviar {vid_id} tras 3 intentos. Archivo conservado.")
+
+                    await asyncio.sleep(1.5)
+
+                profile.last_checked_at = datetime.utcnow()
+                db.commit()
+                logger.info(f"@{profile.username}: {new_videos} nuevos")
+        finally:
+            db.close()
 
 
 async def cmd_start(update: Update, context):
