@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-import traceback
 import re
 from datetime import datetime
 
@@ -76,14 +75,9 @@ def download_video(url):
 
 
 def _scan_profile(profile_url):
-    try:
-        ydl_opts = get_ydl_opts(download=False)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            playlist = ydl.extract_info(profile_url, download=False)
-            return playlist
-    except Exception as e:
-        logger.error(f"Error obteniendo perfil {profile_url}: {e}")
-        return None
+    ydl_opts = get_ydl_opts(download=False)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        return ydl.extract_info(profile_url, download=False)
 
 
 def _download_video_sync(url):
@@ -301,7 +295,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    return FileResponse("templates/index.html")
+    return HTMLResponse("<h1>TikTok Downloader Bot</h1><p>API: /api/profiles /api/videos /api/stats /health</p>")
 
 @app.get("/api/profiles")
 def api_profiles(db: Session = Depends(get_db)):
@@ -389,7 +383,7 @@ async def start_bot():
         await bot_app.updater.start_polling(drop_pending_updates=True)
         logger.info("Polling iniciado (sin RENDER_EXTERNAL_URL)")
 
-    asyncio.create_task(check_and_send())
+    await check_and_send()
     while True:
         await asyncio.sleep(CHECK_INTERVAL_MINUTES * 60)
         await check_and_send()
