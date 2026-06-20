@@ -17,6 +17,7 @@ import yt_dlp
 
 try:
     from curl_cffi import requests as curl_requests
+    from yt_dlp.networking.impersonate import ImpersonateTarget
     IMPERSONATE_AVAILABLE = True
 except ImportError:
     IMPERSONATE_AVAILABLE = False
@@ -50,7 +51,7 @@ def get_ydl_opts(download=True):
         opts["extract_flat"] = True
 
     if IMPERSONATE_AVAILABLE:
-        opts["impersonate"] = "chrome"
+        opts["impersonate"] = ImpersonateTarget(client="chrome")
     else:
         opts["http_headers"] = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
