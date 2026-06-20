@@ -25,6 +25,7 @@ from database import init_db, get_db, SessionLocal, Profile, Video
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.info(f"IMPERSONATE_AVAILABLE={IMPERSONATE_AVAILABLE}")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = int(os.environ.get("CHAT_ID", "0"))
@@ -46,7 +47,7 @@ def get_ydl_opts(download=True):
         opts["format"] = "bestvideo+bestaudio/best"
         opts["merge_output_format"] = "mp4"
     else:
-        opts["extract_flat"] = "in_playlist"
+        opts["extract_flat"] = True
 
     if IMPERSONATE_AVAILABLE:
         opts["impersonate"] = "chrome"
@@ -113,11 +114,11 @@ async def check_and_send():
                     pass
                 continue
             except Exception as e:
-                logger.error(f"Error obteniendo @{profile.username}: {e}")
+                logger.error(f"Error obteniendo @{profile.username}: {type(e).__name__}: {e}")
                 try:
                     await bot.send_message(
                         chat_id=CHAT_ID,
-                        text=f"Error revisando @{profile.username}: {e}",
+                        text=f"Error revisando @{profile.username}: {type(e).__name__}: {e}",
                     )
                 except Exception:
                     pass
