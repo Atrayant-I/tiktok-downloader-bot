@@ -153,10 +153,11 @@ async def check_and_send():
                     if not path:
                         continue
 
+                    title = (info.get("title") or "Nuevo video").strip()[:500]
                     video = Video(
                         video_id=vid_id,
                         username=profile.username,
-                        title=(info.get("title") or "Nuevo video").strip()[:500],
+                        title=title,
                         thumbnail_url=info.get("thumbnail"),
                         duration=info.get("duration"),
                         view_count=info.get("view_count"),
@@ -167,23 +168,23 @@ async def check_and_send():
                     profile.video_count += 1
                     db.commit()
 
-                caption = f"@{profile.username} - {video.title}"
-                sent_ok = False
+                    caption = f"@{profile.username} - {title}"
+                    sent_ok = False
 
-                for attempt in range(3):
-                    try:
-                        file_size = os.path.getsize(path)
-                        if file_size < 50 * 1024 * 1024:
-                            with open(path, "rb") as f:
-                                await bot.send_video(chat_id=CHAT_ID, video=f, caption=caption)
-                        else:
-                            await bot.send_message(chat_id=CHAT_ID, text=f"{caption}\n+50MB: {video_url}")
-                        sent_ok = True
-                        break
-                    except Exception as e:
-                        logger.warning(f"Intento {attempt + 1} fallido enviando {vid_id}: {e}")
-                        if attempt < 2:
-                            await asyncio.sleep(2)
+                    for attempt in range(3):
+                        try:
+                            file_size = os.path.getsize(path)
+                            if file_size < 50 * 1024 * 1024:
+                                with open(path, "rb") as f:
+                                    await bot.send_video(chat_id=CHAT_ID, video=f, caption=caption)
+                            else:
+                                await bot.send_message(chat_id=CHAT_ID, text=f"{caption}\n+50MB: {video_url}")
+                            sent_ok = True
+                            break
+                        except Exception as e:
+                            logger.warning(f"Intento {attempt + 1} fallido enviando {vid_id}: {e}")
+                            if attempt < 2:
+                                await asyncio.sleep(2)
 
                     if sent_ok:
                         os.remove(path)
